@@ -12,12 +12,52 @@
 #include <android/log.h>
 #include "JNI.h"
 
+#define LOG_ERROR(FMT, ...) __android_log_print(ANDROID_LOG_ERROR, "XPU", FMT, ## __VA_ARGS__)
+
 JavaVM  *jvm_ = NULL;
 
 namespace xpu
 {
     namespace Internal
     {
+        // utils
+        template<typename T>
+        class LocalRef
+        {
+        private:
+            T ref_;
+            Android::Env &env_;
+        public:
+            LocalRef(T ref, Android::Env &env)
+            : ref_(ref)
+            , env_(env)
+            { }
+
+            ~LocalRef()
+            {
+                env_->DeleteLocalRef(ref_);
+            }
+
+            operator bool() const { return ref_; }
+            T get() const { return ref_; }
+        };
+
+        class ExceptionClear
+        {
+        private:
+            Android::Env &env_;
+        public:
+            ExceptionClear(Android::Env &env)
+            : env_(env)
+            { }
+
+            ~ExceptionClear()
+            {
+                env_->ExceptionClear();
+            }
+        };
+        // ----
+
         void loadFunc()
         {
             typedef jint (*FuncType)(JavaVM **, jsize, jsize *);
@@ -30,14 +70,14 @@ namespace xpu
 
             if(!handle)
             {
-                __android_log_print(ANDROID_LOG_ERROR, "XPU", "failed to load shared object");
+                LOG_ERROR("failed to load shared object");
                 return;
             }
 
             FuncType func = reinterpret_cast<FuncType>(dlsym(handle, "JNI_GetCreatedJavaVMs"));
             if(!func)
             {
-                __android_log_print(ANDROID_LOG_ERROR, "XPU", "failed to get JNI_GetCreatedJavaVMs");
+                LOG_ERROR("failed to get JNI_GetCreatedJavaVMs");
                 dlclose(handle);
                 return;
             }
@@ -46,7 +86,7 @@ namespace xpu
             const jint r = (*func)(&jvm_, 1 ,&ct);
             if(r != JNI_OK)
             {
-                __android_log_print(ANDROID_LOG_ERROR, "XPU", "failed to get JavaVM");
+                LOG_ERROR("failed to get JavaVM");
                 dlclose(handle);
                 return;
             }
@@ -57,38 +97,109 @@ namespace xpu
         std::string getVersionName()
         {
             Android::Env env(jvm_);
-            jclass activityThreadClass = env->FindClass("android/app/ActivityThread");
-            jmethodID idCurrentApplication = env->GetStaticMethodID(activityThreadClass, "currentApplication", "()Landroid/app/Application;");
+            ExceptionClear ec(env);
+            LocalRef<jclass> activityThreadClass(env->FindClass("android/app/ActivityThread"), env);
+            if(!activityThreadClass)
+            {
+                LOG_ERROR("failed to find class 'android/app/ActivityThread'");
+                return "";
+            }
 
-            jobject application = env->CallStaticObjectMethod(activityThreadClass, idCurrentApplication);
-            jclass applicationClass = env->GetObjectClass(application);
+            jmethodID idCurrentApplication = env->GetStaticMethodID(activityThreadClass.get(), "currentApplication", "()Landroid/app/Application;");
+            if(!idCurrentApplication)
+            {
+                LOG_ERROR("failed to get 'currentApplication'");
+                return "";
+            }
 
-            jmethodID idGetPackageManager = env->GetMethodID(applicationClass, "getPackageManager", "()Landroid/content/pm/PackageManager;");
-            jobject packageManager = env->CallObjectMethod(application, idGetPackageManager);
-            jclass packageManagerClass = env->GetObjectClass(packageManager);
+            LocalRef<jobject> application(env->CallStaticObjectMethod(activityThreadClass.get(), idCurrentApplication), env);
+            if(!application)
+            {
+                LOG_ERROR("failed to call 'currentApplication'");
+                return "";
+            }
 
-            jmethodID idGetPackageName = env->GetMethodID(applicationClass, "getPackageName", "()Ljava/lang/String;");
-            jobject packageName = env->CallObjectMethod(application, idGetPackageName);
+            LocalRef<jclass> applicationClass(env->GetObjectClass(application.get()), env);
+            if(!applicationClass)
+            {
+                LOG_ERROR("failed to get class 'android/app/Application'");
+                return "";
+            }
 
-            jmethodID idGetPackageInfo = env->GetMethodID(packageManagerClass, "getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;");
-            jobject packageInfo = env->CallObjectMethod(packageManager, idGetPackageInfo, packageName, 0);
-            jclass packageInfoClass = env->GetObjectClass(packageInfo);
+            jmethodID idGetPackageManager = env->GetMethodID(applicationClass.get(), "getPackageManager", "()Landroid/content/pm/PackageManager;");
+            if(!idGetPackageManager)
+            {
+                LOG_ERROR("failed to get 'getPackageManager'");
+                return "";
+            }
 
-            jfieldID idVersionName = env->GetFieldID(packageInfoClass, "versionName", "Ljava/lang/String;");
-            jstring versionName = static_cast<jstring>(env->GetObjectField(packageInfo, idVersionName));
+            LocalRef<jobject> packageManager(env->CallObjectMethod(application.get(), idGetPackageManager), env);
+            if(!packageManager)
+            {
+                LOG_ERROR("failed to call 'getPackageManager'");
+                return "";
+            }
+
+            LocalRef<jclass> packageManagerClass(env->GetObjectClass(packageManager.get()), env);
+            if(!packageManagerClass)
+            {
+                LOG_ERROR("failed to get class 'android/content/pm/PackageManager'");
+                return "";
+            }
+
+            jmethodID idGetPackageName = env->GetMethodID(applicationClass.get(), "getPackageName", "()Ljava/lang/String;");
+            if(!idGetPackageName)
+            {
+                LOG_ERROR("failed to get 'idGetPackageName'");
+                return "";
+            }
+
+            LocalRef<jobject> packageName(env->CallObjectMethod(application.get(), idGetPackageName), env);
+            if(!packageName)
+            {
+                LOG_ERROR("failed to call 'getPackageName'");
+                return "";
+            }
+
+            jmethodID idGetPackageInfo = env->GetMethodID(packageManagerClass.get(), "getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;");
+            if(!idGetPackageInfo)
+            {
+                LOG_ERROR("failed to get 'getPackageInfo'");
+                return "";
+            }
+
+            LocalRef<jobject> packageInfo(env->CallObjectMethod(packageManager.get(), idGetPackageInfo, packageName.get(), 0), env);
+            if(!packageInfo)
+            {
+                LOG_ERROR("failed to call 'getPackageInfo'");
+                return "";
+            }
+
+            LocalRef<jclass> packageInfoClass(env->GetObjectClass(packageInfo.get()), env);
+            if(!packageInfoClass)
+            {
+                LOG_ERROR("failed to get class 'android/content/pm/PackageInfo'");
+                return "";
+            }
+
+            jfieldID idVersionName = env->GetFieldID(packageInfoClass.get(), "versionName", "Ljava/lang/String;");
+            if(!idVersionName)
+            {
+                LOG_ERROR("failed to get field 'versionName'");
+                return "";
+            }
+
+            jstring versionName = static_cast<jstring>(env->GetObjectField(packageInfo.get(), idVersionName));
+            if(!versionName)
+            {
+                LOG_ERROR("failed to get 'versionName'");
+                return "";
+            }
+
             const char *str = env->GetStringUTFChars(versionName, NULL);
             const std::string r = str;
             env->ReleaseStringUTFChars(versionName, str);
             env->DeleteLocalRef(versionName);
-
-            env->DeleteLocalRef(packageInfoClass);
-            env->DeleteLocalRef(packageInfo);
-            env->DeleteLocalRef(packageName);
-            env->DeleteLocalRef(packageManagerClass);
-            env->DeleteLocalRef(packageManager);
-            env->DeleteLocalRef(applicationClass);
-            env->DeleteLocalRef(application);
-            env->DeleteLocalRef(activityThreadClass);
 
             return r;
         }
